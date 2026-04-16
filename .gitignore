@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Runtime data directories (created by Docker containers — do not commit)
+bot-data/
+beszel-data/
+beszel-agent-data/
+portainer-data/
+
+# Logs
+*.log

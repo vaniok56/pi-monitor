@@ -1,0 +1,95 @@
+services:
+
+  # ── Core ────────────────────────────────────────────────────────────────────
+
+  pi-control-bot:
+    build: ./bot
+    container_name: pi-control-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Registry persistence — stores the container registry between restarts.
+      - ./bot-data:/data
+      # Must be mounted at the exact host path so that "docker compose" calls
+      # inside the container produce volume paths the daemon can resolve.
+      - ${DESKTOP_PATH:-/home/pi/Desktop}:${DESKTOP_PATH:-/home/pi/Desktop}:rw
+    networks:
+      - pi-monitor
+
+  # Weekly image/builder/volume prune — keeps disk usage in check automatically.
+  docker-prune:
+    image: docker:cli
+    container_name: docker-prune
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo '0 3 * * 0 docker image prune -f && docker builder prune -f && docker volume prune -f' | crontab -
+        crond -f -l 8
+
+  # ── Optional monitoring stack (--profile monitoring) ────────────────────────
+  #
+  # Start with:
+  #   docker compose --profile monitoring up -d
+  #
+  # Beszel:    http://<your-pi>:8090  — system & Docker monitoring dashboard
+  # Portainer: http://<your-pi>:9000  — Docker web UI
+
+  beszel:
+    profiles: [monitoring]
+    image: henrygd/beszel:latest
+    container_name: beszel
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./beszel-data:/beszel_data
+    networks:
+      - pi-monitor
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  beszel-agent:
+    profiles: [monitoring]
+    image: henrygd/beszel-agent:latest
+    container_name: beszel-agent
+    restart: unless-stopped
+    # Host network gives the agent an accurate view of host interfaces,
+    # disk, and thermal zones without needing extra mounts.
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./beszel-agent-data:/var/lib/beszel-agent
+    environment:
+      PORT: "45876"
+      # Generate KEY from Beszel hub UI: Systems → Add system → copy the public key.
+      # Then set BESZEL_KEY in .env and run: docker compose --profile monitoring up -d
+      KEY: "${BESZEL_KEY:-}"
+
+  portainer:
+    profiles: [monitoring]
+    image: portainer/portainer-ce:lts
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./portainer-data:/data
+    networks:
+      - pi-monitor
+
+networks:
+  pi-monitor:
+    driver: bridge
+  # If you run a local Telegram Bot API server in a separate compose stack,
+  # declare its network here as external and add it to pi-control-bot's networks.
+  # Example:
+  #   my_bot_api_network:
+  #     external: true

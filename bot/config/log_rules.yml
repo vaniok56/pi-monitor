@@ -1,0 +1,89 @@
+# Log-loop detector rules per container.
+# Containers not listed here inherit from `defaults`.
+#
+# Fields:
+#   interesting:      list of regex patterns (case-insensitive OR'd together).
+#                     A line must match at least one to be considered.
+#   ignore:           list of regex patterns — matching lines are silently dropped
+#                     (applied after `interesting`, before fingerprinting).
+#   window_seconds:   sliding window size for counting repeated signatures.
+#   threshold:        how many matches of the same signature within the window → alert.
+#   cooldown_minutes: minimum gap between two alerts for the same signature.
+#
+# Add your own containers under `containers:` to tune alerting per service.
+
+defaults:
+  interesting:
+    - "ERROR"
+    - "WARN(ING)?"
+    - "CRITICAL"
+    - "FATAL"
+    - "Exception"
+    - "Traceback"
+    - "Errno \\d+"
+    - "panic:"
+    - "SIGSEGV"
+    - "stack trace"
+    - "timeout"
+    - "refused"
+    - "reset by peer"
+    - "5\\d\\d [A-Z]"      # HTTP 5xx
+  ignore: []
+  window_seconds: 60
+  threshold: 20
+  cooldown_minutes: 10
+
+containers:
+  # ── Examples — replace or extend with your own containers ─────────────────
+
+  # Example: a chatbot or long-running service with noisy reconnect logs.
+  # Lower threshold + wider filter catches reconnect storms early.
+  # my-chatbot:
+  #   interesting:
+  #     - "ERROR"
+  #     - "WARNING"
+  #     - "closed the connection"
+  #     - "reconnect"
+  #     - "Connection reset"
+  #     - "Errno \\d+"
+  #   threshold: 15
+  #   window_seconds: 60
+  #   cooldown_minutes: 10
+
+  # Example: a normally quiet worker — a handful of errors = something is wrong.
+  # my-worker:
+  #   threshold: 5
+  #   window_seconds: 30
+  #   cooldown_minutes: 10
+
+  # Example: an HTTP server — ignore noisy access log lines.
+  # my-webserver:
+  #   ignore:
+  #     - "GET /"
+  #     - "favicon.ico"
+  #     - "OPTIONS /"
+
+  # ── Optional monitoring stack ──────────────────────────────────────────────
+
+  # telegram-bot-api produces chatty info logs — only alert on real errors.
+  telegram-bot-api:
+    interesting:
+      - "ERROR"
+      - "FATAL"
+      - "panic"
+    threshold: 3
+    window_seconds: 30
+    cooldown_minutes: 5
+
+  # Beszel / Portainer internal logs are usually benign.
+  beszel:
+    interesting:
+      - "ERROR"
+      - "panic"
+    threshold: 3
+
+  portainer:
+    interesting:
+      - "error"
+      - "fatal"
+    threshold: 3
