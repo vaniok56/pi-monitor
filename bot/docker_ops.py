@@ -26,6 +26,8 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+import timez
 from typing import Optional
 
 import docker
@@ -222,7 +224,7 @@ def container_detail_text(entry: Entry) -> str:
     created_raw = attrs.get("Created", "")
     try:
         created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-        created = created_dt.strftime("%Y-%m-%d %H:%M")
+        created = timez.fmt(created_dt, "%Y-%m-%d %H:%M")
     except Exception:
         created = "?"
 

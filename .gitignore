@@ -1,5 +1,12 @@
 # Secrets
 .env
+.env.tmp
+
+# Deploy config (user-specific, contains hostnames)
+.deploy.local
+
+# Per-host plugin config (use plugins.yml.example as template)
+bot/config/plugins.yml
 
 # Python
 __pycache__/

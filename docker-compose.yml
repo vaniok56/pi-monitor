@@ -5,33 +5,20 @@ services:
   pi-control-bot:
     build: ./bot
     container_name: pi-control-bot
+    hostname: pi-control-bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      TZ: "${TZ:-UTC}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Registry persistence — stores the container registry between restarts.
       - ./bot-data:/data
       # Must be mounted at the exact host path so that "docker compose" calls
       # inside the container produce volume paths the daemon can resolve.
-      - ${DESKTOP_PATH:-/home/pi/Desktop}:${DESKTOP_PATH:-/home/pi/Desktop}:rw
+      - ${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:rw
     networks:
       - pi-monitor
-
-  # Weekly image/builder/volume prune — keeps disk usage in check automatically.
-  docker-prune:
-    image: docker:cli
-    container_name: docker-prune
-    restart: unless-stopped
-    environment:
-      TZ: ${TZ:-UTC}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        echo '0 3 * * 0 docker image prune -f && docker builder prune -f && docker volume prune -f' | crontab -
-        crond -f -l 8
 
   # ── Optional monitoring stack (--profile monitoring) ────────────────────────
   #

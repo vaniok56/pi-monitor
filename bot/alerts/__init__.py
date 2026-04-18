@@ -23,6 +23,7 @@ class AlertItem:
     # de-dup key — same key = same incident, subject to cooldown
     key: str
     container: Optional[str] = None
+    family: Optional[str] = None
     # If True, show Restart / Rebuild buttons in the alert message
     show_container_buttons: bool = False
     # If set, show a "Silence this signature" button

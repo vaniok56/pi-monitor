@@ -114,11 +114,21 @@ _MAX_LINES_PER_SECOND = 10_000
 _FLOOD_WINDOW = 5  # seconds
 
 
+def _get_family(container_name: str) -> Optional[str]:
+    try:
+        import docker as _docker
+        c = _docker.from_env().containers.get(container_name)
+        return c.labels.get("com.docker.compose.project") or None
+    except Exception:
+        return None
+
+
 class ContainerLogTailer:
     """Daemon thread that tails one container and feeds the log-loop detector."""
 
     def __init__(self, container_name: str, rules_raw: dict) -> None:
         self.name = container_name
+        self._family: Optional[str] = _get_family(container_name)
         self._rules = _compile_rules(rules_raw, container_name)
         self._stop = threading.Event()
         self._cooldowns: dict[str, float] = {}  # sig_hash → last fire time
@@ -173,6 +183,7 @@ class ContainerLogTailer:
                 ),
                 key=f"logflood:{self.name}",
                 container=self.name,
+                family=self._family,
                 show_container_buttons=True,
             ))
             # Back off — let the container calm down
@@ -235,6 +246,7 @@ class ContainerLogTailer:
             ),
             key=f"logloop:{self.name}:{sh}",
             container=self.name,
+            family=self._family,
             show_container_buttons=True,
             sig_hash=sh,
         ))

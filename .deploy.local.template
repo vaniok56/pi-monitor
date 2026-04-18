@@ -1,0 +1,14 @@
+# Copy this file to .deploy.local and edit values:
+#   cp .deploy.local.template .deploy.local
+#
+# deploy.sh sources .deploy.local automatically.
+
+SSH_ALIAS=raspi4b
+PI_USER=pi
+PI_HOST=raspberrypi.local
+
+# Destination on remote host
+PI_DEST=/home/pi/pi-monitor
+
+# Optional: start monitoring profile (Beszel + Portainer) after deploy
+# ENABLE_MONITORING_PROFILE=1
