@@ -8,6 +8,9 @@
 # Per-host plugin config (use plugins.yml.example as template)
 bot/config/plugins.yml
 
+# Tests (local only)
+tests/
+
 # Python
 __pycache__/
 *.pyc
