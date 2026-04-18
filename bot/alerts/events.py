@@ -34,6 +34,7 @@ _restart_times: dict[str, deque] = defaultdict(deque)
 _restart_lock = threading.Lock()
 _RESTART_WINDOW = 120   # seconds
 _RESTART_THRESHOLD = 3  # restarts in window before alerting
+_INTERNAL_HELPER_LABEL = "com.pi-monitor.internal_helper"
 
 
 def _get_quick_tail(name: str, lines: int = 15) -> str:
@@ -99,6 +100,10 @@ class DockerEventsMonitor:
         attrs = event.get("Actor", {}).get("Attributes", {})
         name = attrs.get("name", "unknown")
 
+        # Ignore short-lived internal helper containers spawned by plugins.
+        if attrs.get(_INTERNAL_HELPER_LABEL) == "true":
+            return
+
         # ── Crash ─────────────────────────────────────────────────────────
         if action == "die":
             exit_code = attrs.get("exitCode", "0")
@@ -124,6 +129,7 @@ class DockerEventsMonitor:
                     body="\n".join(body_parts),
                     key=f"crash:{name}",
                     container=name,
+                    family=family or None,
                     show_container_buttons=True,
                 ))
 
@@ -147,6 +153,7 @@ class DockerEventsMonitor:
                         ),
                         key=f"restart_loop:{name}",
                         container=name,
+                        family=attrs.get("com.docker.compose.project") or None,
                         show_container_buttons=True,
                     ))
 
@@ -163,6 +170,7 @@ class DockerEventsMonitor:
                     ),
                     key=f"unhealthy:{name}",
                     container=name,
+                    family=attrs.get("com.docker.compose.project") or None,
                     show_container_buttons=True,
                 ))
 

@@ -1,0 +1,103 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# pi-monitor plugin configuration
+# Copy this file to bot/config/plugins.yml (or wherever PLUGINS_YML_PATH points)
+# and enable the plugins you want.
+#
+# Changes require a bot restart:
+#   docker compose up -d --build pi-control-bot   (or: docker restart pi-control-bot)
+#
+# Plugin toggle via Telegram UI is planned for a future release.
+# ══════════════════════════════════════════════════════════════════════════════
+
+enabled:
+
+  # ── docker_prune ─────────────────────────────────────────────────────────────
+  # Weekly Docker image/builder/volume prune. Adds a manual button to the Plugins
+  # menu. Replaces the old docker-prune sidecar container.
+  docker_prune:
+    # Optional cron expression (configured TZ, default UTC). Omit for manual-only mode.
+    schedule: "0 3 * * 0" # Min, Hour, Day, Month, Day-of-Week
+    # Set to true to also add an "aggressive prune" button
+    # (docker system prune -a --volumes). Requires explicit confirmation.
+    aggressive: false
+
+  # ── midnight_restarter ────────────────────────────────────────────────────────
+  # Restart whitelisted containers on a daily schedule.
+  # Useful for containers that develop memory leaks or need periodic recycling.
+  midnight_restarter:
+    containers:
+      - stremio-server
+    # Optional time in HH:MM (configured TZ, default UTC). Omit for manual-only mode.
+    time: "04:00"
+
+  # ── host_controls ─────────────────────────────────────────────────────────────
+  # Adds a "Host controls" button to the Plugins menu with:
+  #   Restart bot, Drop caches, Reboot host, Shutdown host
+  # All operations require an explicit confirmation tap.
+  host_controls: {}
+
+
+  # ── stremio_cache ─────────────────────────────────────────────────────────────
+  # Wipe Stremio cache inside its container on schedule or on demand.
+  # container: the Docker container name running Stremio.
+  # path: the cache directory path inside that container.
+  # stremio_cache:
+  #   container: stremio-server
+  #   path: /root/.stremio-server/stremio-cache
+  #   # Optional cron expression (omit for manual-only mode)
+  #   schedule: "0 3 * * 0"   # Sunday 03:00 in configured TZ (default UTC)
+
+  # ── apt_maintenance ─────────────────────────────────────────────────────────
+  # Fast menu for host package maintenance.
+  # Update flow: apt-get update + apt-get upgrade -y.
+  # Cleanup flow: apt-get autoremove -y + apt-get clean.
+  # apt_maintenance:
+  #   max_listed_updates: 20
+  #   helper_image: "alpine:3.20"
+
+  # ── wol_sender ────────────────────────────────────────────────────────────────
+  # Send Wake-on-LAN magic packets. One button per target.
+  # wol_sender:
+  #   targets:
+  #     - {name: "tower", mac: "AA:BB:CC:DD:EE:FF"}
+  #     - {name: "nas",   mac: "11:22:33:44:55:66"}
+
+  # ── rpi_throttle_watch ────────────────────────────────────────────────────────
+  # Alert on Pi under-voltage / throttling (Pi only; requires vcgencmd).
+  # rpi_throttle_watch:
+  #   # Optional interval (omit for manual-only checks)
+  #   interval_seconds: 300
+
+  # ── smart_disk_health ─────────────────────────────────────────────────────────
+  # Daily S.M.A.R.T. health check via privileged alpine container.
+  # Auto-disabled on Pi unless allow_on_pi: true.
+  # smart_disk_health:
+  #   devices: [/dev/sda]
+  #   # Optional cron expression (omit for manual-only checks)
+  #   schedule: "0 6 * * *"
+  #   allow_on_pi: false
+
+  # ── disk_fill_eta ─────────────────────────────────────────────────────────────
+  # Predict disk-full date from linear regression on sampled usage.
+  # disk_fill_eta:
+  #   path: "/"
+  #   threshold_days: 14
+  #   # Optional cron expression (omit for manual-only sampling)
+  #   schedule: "0 */4 * * *"
+  #   history_path: /data/disk_history.json
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Mac mini sample — same bot image, host-specific plugins
+# ══════════════════════════════════════════════════════════════════════════════
+# enabled:
+#   docker_prune:
+#     schedule: "0 3 * * 0"
+#     aggressive: false
+#   host_controls: {}
+#   smart_disk_health:
+#     devices: [/dev/sda]
+#     schedule: "0 6 * * *"
+#   disk_fill_eta:
+#     path: "/"
+#     threshold_days: 14

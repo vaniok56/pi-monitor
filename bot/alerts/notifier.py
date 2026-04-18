@@ -48,10 +48,14 @@ class Notifier:
         bot: Bot,
         allowed_users: Set[int],
         cooldown_minutes: int,
+        host_label: str = "",
+        mute_store=None,
     ) -> None:
         self.bot = bot
         self.allowed_users = allowed_users
         self.cooldown = cooldown_minutes * 60
+        self.host_label = host_label
+        self.mute_store = mute_store
         self._last_fire: dict[str, float] = {}
         self._ignored_sigs: Set[str] = set()
         # (container_name, human-readable timestamp) — in-memory only
@@ -76,16 +80,27 @@ class Notifier:
     async def dispatch(self, alert: AlertItem) -> None:
         if alert.sig_hash and alert.sig_hash in self._ignored_sigs:
             return
+        if self.mute_store is not None and self.mute_store.is_muted(
+            container=alert.container,
+            family=alert.family,
+            alert_type=alert.type.value,
+        ):
+            logger.info(
+                "alert muted: container=%s family=%s type=%s",
+                alert.container, alert.family, alert.type.value,
+            )
+            return
         if not self._can_fire(alert.key):
             return
 
         # Track last alert for the "Last alert" jump button
         if alert.container:
-            from datetime import datetime
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            import timez
+            ts = timez.fmt(timez.now(), "%Y-%m-%d %H:%M")
             self.last_alert = (alert.container, ts)
 
-        text = f"<b>{alert.title}</b>\n\n{alert.body}"
+        prefix = f"[{self.host_label}] " if self.host_label else ""
+        text = f"{prefix}<b>{alert.title}</b>\n\n{alert.body}"
 
         buttons: list[list[InlineKeyboardButton]] = []
         if alert.container and alert.show_container_buttons:

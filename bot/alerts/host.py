@@ -209,6 +209,7 @@ class HostWatchdog:
         swap_pct: float,
         cpu_load: float,
         temp_c: float,
+        host_label: str = "",
         interval: int = 60,
     ) -> None:
         self.disk_pct = disk_pct
@@ -216,6 +217,7 @@ class HostWatchdog:
         self.swap_pct = swap_pct
         self.cpu_load = cpu_load
         self.temp_c = temp_c
+        self.host_label = host_label.strip()
         self.interval = interval
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -313,9 +315,10 @@ class HostWatchdog:
         load1, load5, load15 = stats["load"]
         temp = stats["temp"]
         uptime_secs = stats["uptime_secs"]
+        display_label = self.host_label or _get_device_name()
 
         lines = [
-            f"🖥  <b>{_get_device_name()}</b> — up {_fmt_uptime(uptime_secs)}",
+            f"🖥  <b>{display_label}</b> — up {_fmt_uptime(uptime_secs)}",
             "────────────────────────────",
             f"🧠  RAM:   {_fmt_bytes(mem.used)} / {_fmt_bytes(mem.total)}  ({mem.percent:.1f}%)",
         ]

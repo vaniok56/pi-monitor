@@ -4,6 +4,9 @@ A Telegram bot for monitoring and managing Docker containers on a Raspberry Pi (
 
 > **Quick start:** 3 steps — clone, configure, run. No database, no web server, no cloud account beyond a Telegram bot token.
 
+> [!WARNING]
+> **This repo was fully built using Claude (Anthropic AI).** Every line of code, every config, every README — vibecoded from scratch. No human wrote the implementation. Use at your own risk, audit before running on production hardware.
+
 ---
 
 ## Features
@@ -31,6 +34,13 @@ A Telegram bot for monitoring and managing Docker containers on a Raspberry Pi (
 - Silence a specific log-loop signature without restarting the bot
 - Error-only log filter for quick diagnosis
 
+### Plugin System
+- **docker_prune** — weekly Docker image/builder/volume prune, plus a manual button; replaces the old `docker-prune` sidecar container
+- **midnight_restarter** — restart whitelisted containers on a daily schedule (replaces ad-hoc restarter sidecars)
+- **host_controls** — reboot, shutdown, restart bot, drop caches — all with two-step confirmation
+- **apt_maintenance** — instant action menu with separate update and cleanup flows, plus docker-sensitive confirm before upgrade
+- Opt-in per host via `bot/config/plugins.yml` — no Telegram toggle yet (planned)
+
 ### Optional Monitoring Stack
 - **Beszel** — lightweight system and Docker monitoring dashboard (`:8090`)
 - **Portainer** — Docker web UI (`:9000`)
@@ -53,17 +63,28 @@ cd pi-monitor
 cp .env.example .env
 ```
 
-Edit `.env` — only two values are required to get started:
+Edit `.env` — three values are required to get started:
 
 ```bash
 BOT_TOKEN=your_bot_token_here
 ALLOWED_USER_IDS=123456789
+DESKTOP_PATH=/home/pi/Desktop
 ```
 
 Set `DESKTOP_PATH` to your actual Desktop path (used when the bot runs `docker compose` commands):
 
 ```bash
+# Raspberry Pi (default user)
 DESKTOP_PATH=/home/pi/Desktop
+
+# Mac mini / custom user
+DESKTOP_PATH=/home/yourname/Desktop
+```
+
+Optionally set `HOST_LABEL` to a short name for this machine. It will prefix all alerts so you can tell which host sent them when running the same bot on multiple machines:
+
+```bash
+HOST_LABEL=raspik4b
 ```
 
 ### 2. Start the bot
@@ -107,7 +128,9 @@ Then open:
 |---|---|---|---|
 | `BOT_TOKEN` | ✅ | — | Telegram bot token from @BotFather |
 | `ALLOWED_USER_IDS` | ✅ | — | Comma-separated Telegram user IDs |
-| `DESKTOP_PATH` | | `/home/pi/Desktop` | Absolute host path to your Desktop directory |
+| `DESKTOP_PATH` | ✅ | — | Absolute host path to your Desktop directory |
+| `HOST_LABEL` | | hostname | Short label prefixed on all alerts (e.g. `raspik4b`) |
+| `PLUGINS_YML_PATH` | | `/app/config/plugins.yml` | Path to plugin config inside the container |
 | `REGISTRY_PATH` | | `/data/registry.json` | Where the bot persists the container registry |
 | `TELEGRAM_API_BASE_URL` | | Telegram cloud | Override to use a local Bot API server |
 | `DISK_THRESHOLD_PCT` | | `90` | Disk usage % that triggers an alert |
@@ -116,8 +139,43 @@ Then open:
 | `CPU_LOAD_THRESHOLD` | | `3.0` | 1-min load average per core that triggers an alert |
 | `TEMP_THRESHOLD_C` | | `75` | CPU/SoC temperature (°C) that triggers an alert |
 | `ALERT_COOLDOWN_MINUTES` | | `10` | Minimum gap between repeated alerts for the same issue |
+| `TZ` | | `UTC` | IANA timezone for all display timestamps and cron/daily schedules |
 | `BESZEL_KEY` | | — | Beszel agent public key (monitoring profile only) |
-| `TZ` | | `UTC` | Timezone for the docker-prune cron |
+
+### Plugins
+
+Plugins are enabled in `bot/config/plugins.yml` (copy from `bot/config/plugins.yml.example`):
+
+```yaml
+enabled:
+  docker_prune:
+    schedule: "0 3 * * 0"   # optional cron (configured TZ, default UTC); omit for manual-only
+    aggressive: false
+  apt_maintenance:
+    max_listed_updates: 20
+  midnight_restarter:
+    containers: [stremio-server]
+    time: "04:00"            # optional HH:MM (configured TZ, default UTC); omit for manual-only
+  host_controls: {}
+```
+
+For auto-capable plugins, omitting `schedule` / `time` / `interval_seconds` disables automatic execution and keeps the plugin manual-only in Telegram.
+
+After editing, restart the bot to apply: `docker compose up -d --build pi-control-bot`
+
+By default, `plugins.yml` is loaded from `/app/config/plugins.yml` inside the image, so rebuilding `pi-control-bot` is required after edits. If you prefer restart-only config updates, set `PLUGINS_YML_PATH=/data/plugins.yml` and keep that file in the `bot-data` volume.
+
+Enabled plugins appear under the **🧩 Plugins** button in `/start`.
+
+> **Dynamic plugin toggle via Telegram is planned for a future release.**
+
+**Upgrading from a previous version:** The old `docker-prune` sidecar container has been replaced by the `docker_prune` plugin. After upgrading, remove it if still present:
+
+```bash
+docker rm -f docker-prune
+```
+
+Then enable the plugin in `plugins.yml`.
 
 ### Log Rules
 
@@ -197,29 +255,24 @@ All alert sources push into a single async notifier queue. One consumer sends to
 If you develop on a separate machine and deploy to your Pi over SSH, use the included `deploy.sh`:
 
 ```bash
+# One-time setup
+cp .deploy.local.template .deploy.local
+# Edit .deploy.local and set SSH_ALIAS=raspi4b
+
 # Full deploy (rsync + rebuild)
-./deploy.sh
+./deploy.sh full --alias raspi4b
 
 # Bot code only (faster iteration)
-./deploy.sh bot
+./deploy.sh bot --alias raspi4b
 
 # Config files only (log rules, no rebuild)
-./deploy.sh config
+./deploy.sh config --alias raspi4b
+
+# Optional: also start monitoring profile (Beszel + Portainer)
+./deploy.sh full --alias raspi4b --monitoring
 ```
 
-Configure the target host via environment variables:
-
-```bash
-PI_USER=pi PI_HOST=raspberrypi.local ./deploy.sh
-```
-
-Or set them permanently in your shell profile:
-
-```bash
-export PI_USER=pi
-export PI_HOST=raspberrypi.local
-export SSH_ALIAS=mypi   # optional: SSH config alias for key auth / custom port
-```
+`deploy.sh` supports alias-first resolution and auto-derives host/user from your SSH config.
 
 ---
 

@@ -23,13 +23,21 @@ Inline keyboard callback_data format:
   last_alert                    → jump to last-alerted container detail
   host_status                   → /status refreshed in-place (one-shot)
   ignore_sig:<hash>             → permanently ignore a log-loop signature
+  plugins_menu                  → show plugin buttons submenu
+  mute_menu:<name>              → mute duration submenu for container
+  mute:<name>:<dur>             → mute container (dur: 1h | 24h | forever)
+  unmute:<name>                 → unmute container
+  family_mute_menu:<name>       → mute duration submenu for family
+  family_mute:<name>:<dur>      → mute family
+  family_unmute:<name>          → unmute family
+  p.<plugin>:<sub>              → plugin action (dispatched to plugin ActionRegistry)
 """
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import docker
 from telegram import (
@@ -47,7 +55,13 @@ from alerts.host import HostWatchdog, _get_docker_stats
 from alerts.logloop import LogLoopManager
 from alerts.notifier import Notifier
 
+if TYPE_CHECKING:
+    from plugins._ctx import PluginContext
+
 logger = logging.getLogger(__name__)
+
+# Set by register_core_actions(); used by keyboard builders that need plugin state.
+_plugin_ctx: Optional["PluginContext"] = None
 
 
 # ── Access control ───────────────────────────────────────────────────────────
@@ -85,6 +99,8 @@ def _main_menu_keyboard(families: dict) -> InlineKeyboardMarkup:
         InlineKeyboardButton("📊 Host status", callback_data="host_status"),
         InlineKeyboardButton("🔔 Last alert", callback_data="last_alert"),
     ])
+    if _plugin_ctx and _plugin_ctx.buttons.sorted_buttons():
+        buttons.append([InlineKeyboardButton("🧩 Plugins", callback_data="plugins_menu")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -102,10 +118,8 @@ def _family_keyboard(family_name: str, members: list[Entry]) -> InlineKeyboardMa
         buttons.append(row)
 
     all_gone = all(e.is_ghost for e in members)
-    any_live = any(not e.is_ghost for e in members)
 
     if all_gone:
-        # All ghosts: only offer Start all + Back
         buttons.append([
             InlineKeyboardButton("▶️ Start all", callback_data=f"family_start:{family_name}"),
         ])
@@ -119,6 +133,13 @@ def _family_keyboard(family_name: str, members: list[Entry]) -> InlineKeyboardMa
             InlineKeyboardButton("📋 Merged logs", callback_data=f"family_logs:{family_name}"),
         ])
 
+    if _plugin_ctx and _plugin_ctx.mute_store:
+        muted = _plugin_ctx.mute_store.is_muted(container=None, family=family_name, alert_type=None)
+        if muted:
+            buttons.append([InlineKeyboardButton("🔔 Unmute family", callback_data=f"family_unmute:{family_name}")])
+        else:
+            buttons.append([InlineKeyboardButton("🔕 Mute family", callback_data=f"family_mute_menu:{family_name}")])
+
     buttons.append([InlineKeyboardButton("◀️ Back", callback_data="menu")])
     return InlineKeyboardMarkup(buttons)
 
@@ -128,7 +149,6 @@ def _container_keyboard(entry: Entry, family_name: Optional[str] = None) -> Inli
     rows: list[list[InlineKeyboardButton]] = []
 
     if entry.is_ghost:
-        # Ghost: Start and Forget only
         rows.append([
             InlineKeyboardButton("▶️ Start", callback_data=f"start:{name}"),
             InlineKeyboardButton("🗑 Forget", callback_data=f"forget:{name}"),
@@ -148,6 +168,13 @@ def _container_keyboard(entry: Entry, family_name: Optional[str] = None) -> Inli
             rows.append([InlineKeyboardButton("▶️ Start", callback_data=f"start:{name}")])
             if docker_ops.is_rebuildable(entry):
                 rows.append([InlineKeyboardButton("🔨 Build", callback_data=f"rebuild:{name}")])
+
+    if _plugin_ctx and _plugin_ctx.mute_store:
+        muted = _plugin_ctx.mute_store.is_muted(container=name, family=None, alert_type=None)
+        if muted:
+            rows.append([InlineKeyboardButton("🔔 Unmute", callback_data=f"unmute:{name}")])
+        else:
+            rows.append([InlineKeyboardButton("🔕 Mute", callback_data=f"mute_menu:{name}")])
 
     back_target = f"family:{family_name}" if family_name else "menu"
     rows.append([InlineKeyboardButton("◀️ Back", callback_data=back_target)])
@@ -231,7 +258,6 @@ async def cmd_testalert(
         await update.message.reply_text("✅ Test host alert sent.")
 
     elif mode == "logloop":
-        # Default to the first running container if none specified
         if len(args) > 1:
             container_name = args[1]
         else:
@@ -273,14 +299,444 @@ async def cmd_help(
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
+# ── Core action handlers ─────────────────────────────────────────────────────
+
+async def _action_menu(query, parts, ctx: "PluginContext") -> None:
+    await _edit_main_menu(query)
+
+
+async def _action_family(query, parts, ctx: "PluginContext") -> None:
+    await _show_family_view(query, parts[1])
+
+
+async def _action_container(query, parts, ctx: "PluginContext") -> None:
+    await _show_container_detail(query, parts[1])
+
+
+async def _action_qlogs(query, parts, ctx: "PluginContext") -> None:
+    await _show_quick_logs(query, parts[1])
+
+
+async def _action_logs(query, parts, ctx: "PluginContext") -> None:
+    await _show_logs(query, parts[1], int(parts[2]))
+
+
+async def _action_errors(query, parts, ctx: "PluginContext") -> None:
+    await _show_errors_only(query, parts[1])
+
+
+async def _action_restart(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Restarting <code>{name}</code>…", parse_mode=ParseMode.HTML
+    )
+    result = await docker_ops.restart_container(name)
+    await query.edit_message_text(
+        result, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
+            InlineKeyboardButton("📋 Logs", callback_data=f"logs:{name}:100"),
+        ]]),
+    )
+
+
+async def _action_stop(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Stopping <code>{name}</code>…", parse_mode=ParseMode.HTML
+    )
+    result = await docker_ops.stop_container(name)
+    await query.edit_message_text(
+        result, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
+        ]]),
+    )
+
+
+async def _action_start(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Starting <code>{name}</code>…", parse_mode=ParseMode.HTML
+    )
+    result = await docker_ops.start_container(name)
+    await query.edit_message_text(
+        result, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
+            InlineKeyboardButton("📋 Logs", callback_data=f"logs:{name}:100"),
+        ]]),
+    )
+
+
+async def _action_rebuild(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    entry = await asyncio.to_thread(_find_entry, name)
+    rebuildable = docker_ops.is_rebuildable(entry) if entry else False
+    if not rebuildable:
+        await query.edit_message_text(
+            f"<code>{name}</code> has no local Dockerfile — cannot rebuild from source.\n"
+            "Use Restart to restart from current image.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
+            ]]),
+        )
+        return
+    confirm_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes, Rebuild", callback_data=f"rebuild_confirm:{name}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"container:{name}"),
+    ]])
+    await query.edit_message_text(
+        f"<b>Rebuild {name}?</b>\n\n"
+        "1. <code>docker compose down</code> (whole project stack)\n"
+        "2. <code>docker build</code> from source\n"
+        "3. <code>docker compose up -d</code>\n\n"
+        "May take a few minutes.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_kb,
+    )
+
+
+async def _action_rebuild_confirm(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Rebuilding <code>{name}</code>…\nStep 1/3: compose down",
+        parse_mode=ParseMode.HTML,
+    )
+    try:
+        build_tail, run_logs = await docker_ops.rebuild_container(name)
+    except Exception as exc:
+        await query.edit_message_text(
+            f"❌ <b>Rebuild failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
+            ]]),
+        )
+        return
+    body = (
+        f"✅ <b>{name} rebuilt</b>\n\n"
+        f"<b>Build (last lines):</b>\n<code>{_escape(build_tail[-1500:])}</code>\n\n"
+        f"<b>Container logs (last 100):</b>\n<code>{_escape(run_logs[:2000])}</code>"
+    )
+    back_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
+    ]])
+    if len(body) > 4000:
+        doc = io.BytesIO((build_tail + "\n---\n" + run_logs).encode())
+        doc.name = f"{name}_rebuild.txt"
+        await query.edit_message_text(
+            f"✅ <b>{name}</b> rebuilt. Full output below.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_kb,
+        )
+        await query.message.reply_document(document=doc, caption=f"{name}_rebuild.txt")
+    else:
+        await query.edit_message_text(body, parse_mode=ParseMode.HTML, reply_markup=back_kb)
+
+
+async def _action_family_restart(query, parts, ctx: "PluginContext") -> None:
+    family_name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Restarting all in <b>{family_name}</b>…", parse_mode=ParseMode.HTML
+    )
+    result = await docker_ops.restart_family(family_name)
+    await query.edit_message_text(
+        result, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
+        ]]),
+    )
+
+
+async def _action_family_rebuild(query, parts, ctx: "PluginContext") -> None:
+    family_name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Rebuilding <b>{family_name}</b>…", parse_mode=ParseMode.HTML
+    )
+    try:
+        result = await docker_ops.rebuild_family(family_name)
+    except Exception as exc:
+        result = f"❌ <b>Rebuild failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>"
+    await query.edit_message_text(
+        result, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
+        ]]),
+    )
+
+
+async def _action_family_logs(query, parts, ctx: "PluginContext") -> None:
+    family_name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Fetching merged logs for <b>{family_name}</b>…", parse_mode=ParseMode.HTML
+    )
+    try:
+        logs = await docker_ops.family_merged_logs(family_name)
+    except Exception as exc:
+        logs = f"Error: {exc}"
+    back_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
+    ]])
+    full = f"<b>{family_name}</b> — merged logs:\n\n<code>{_escape(logs)}</code>"
+    if len(full) > 4000:
+        doc = io.BytesIO(logs.encode())
+        doc.name = f"{family_name}_merged_logs.txt"
+        await query.edit_message_text(
+            f"📎 <b>{family_name}</b> — merged logs sent as file below.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_kb,
+        )
+        await query.message.reply_document(document=doc, caption=f"{family_name}_merged_logs.txt")
+    else:
+        await query.edit_message_text(full, parse_mode=ParseMode.HTML, reply_markup=back_kb)
+
+
+async def _action_family_stop(query, parts, ctx: "PluginContext") -> None:
+    family_name = parts[1]
+    confirm_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes, Stop all", callback_data=f"family_stop_confirm:{family_name}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"family:{family_name}"),
+    ]])
+    await query.edit_message_text(
+        f"<b>Stop all — {family_name}?</b>\n\n"
+        "Runs <code>docker compose down</code>.\n"
+        "Containers will be <b>removed</b> (not just stopped).\n"
+        "They remain visible in the bot as ⚫ ghosts and can be\n"
+        "restarted with <b>Start all</b>.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=confirm_kb,
+    )
+
+
+async def _action_family_stop_confirm(query, parts, ctx: "PluginContext") -> None:
+    family_name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Running compose down for <b>{family_name}</b>…", parse_mode=ParseMode.HTML
+    )
+    try:
+        result = await docker_ops.stop_family(family_name)
+    except Exception as exc:
+        result = f"❌ <b>Stop failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>"
+    await query.edit_message_text(
+        result, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
+        ]]),
+    )
+
+
+async def _action_family_start(query, parts, ctx: "PluginContext") -> None:
+    family_name = parts[1]
+    await query.edit_message_text(
+        f"⏳ Starting <b>{family_name}</b>…", parse_mode=ParseMode.HTML
+    )
+    try:
+        result = await docker_ops.start_family(family_name)
+    except Exception as exc:
+        result = f"❌ <b>Start failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>"
+    await query.edit_message_text(
+        result, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
+        ]]),
+    )
+
+
+async def _action_forget(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    reg.forget(name)
+    entry = await asyncio.to_thread(_find_entry, name)
+    back_cb = f"family:{entry.family}" if entry and entry.family != name else "menu"
+    await query.edit_message_text(
+        f"🗑 <code>{name}</code> removed from registry.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data=back_cb),
+        ]]),
+    )
+
+
+async def _action_last_alert(query, parts, ctx: "PluginContext") -> None:
+    last = ctx.notifier.last_alert
+    if last is None:
+        await query.edit_message_text(
+            "No alerts yet.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Menu", callback_data="menu"),
+            ]]),
+        )
+    else:
+        container_name, ts = last
+        await query.edit_message_text(
+            f"🔔 Last alert: <code>{container_name}</code>  ({ts})\n\nNavigating…",
+            parse_mode=ParseMode.HTML,
+        )
+        await _show_container_detail(query, container_name)
+
+
+async def _action_host_status(query, parts, ctx: "PluginContext") -> None:
+    docker_stats = await _get_docker_stats()
+    text = await asyncio.to_thread(ctx.watchdog.host_status_text, docker_stats)
+    await query.edit_message_text(
+        text, parse_mode=ParseMode.HTML,
+        reply_markup=_status_keyboard(),
+    )
+
+
+async def _action_ignore_sig(query, parts, ctx: "PluginContext") -> None:
+    sig_hash = parts[1]
+    ctx.notifier.ignore_signature(sig_hash)
+    ctx.log_loop_manager.reload_rules()
+    await query.edit_message_text(
+        f"🚫 Signature <code>{sig_hash}</code> will be ignored.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _action_plugins_menu(query, parts, ctx: "PluginContext") -> None:
+    plugin_buttons = ctx.buttons.sorted_buttons()
+    if not plugin_buttons:
+        await query.edit_message_text(
+            "No plugins enabled.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Back", callback_data="menu"),
+            ]]),
+        )
+        return
+
+    kb: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for label, cb in plugin_buttons:
+        row.append(InlineKeyboardButton(label, callback_data=cb))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton("◀️ Back", callback_data="menu")])
+
+    await query.edit_message_text(
+        "🧩 <b>Plugins</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+# ── Mute helpers ─────────────────────────────────────────────────────────────
+
+def _until(dur: str) -> str:
+    from datetime import timedelta
+    if dur == "forever":
+        return "forever"
+    n, unit = int(dur[:-1]), dur[-1]
+    delta = {"h": timedelta(hours=n), "d": timedelta(days=n)}[unit]
+    from datetime import datetime, timezone
+    return (datetime.now(timezone.utc) + delta).isoformat()
+
+
+def _mute_submenu(callback_mute: str, callback_back: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("1h", callback_data=f"{callback_mute}:1h"),
+        InlineKeyboardButton("24h", callback_data=f"{callback_mute}:24h"),
+        InlineKeyboardButton("Forever", callback_data=f"{callback_mute}:forever"),
+        InlineKeyboardButton("❌ Cancel", callback_data=callback_back),
+    ]])
+
+
+# ── Mute action handlers ──────────────────────────────────────────────────────
+
+async def _action_mute_menu(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    await query.edit_message_text(
+        f"🔕 Mute alerts for <code>{name}</code>?\n\nChoose duration:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_mute_submenu(f"mute:{name}", f"container:{name}"),
+    )
+
+
+async def _action_mute(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    dur = parts[2] if len(parts) > 2 else "forever"
+    if ctx.mute_store:
+        ctx.mute_store.mute("container", name, _until(dur))
+    await _show_container_detail(query, name)
+
+
+async def _action_unmute(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    if ctx.mute_store:
+        ctx.mute_store.unmute("container", name)
+    await _show_container_detail(query, name)
+
+
+async def _action_family_mute_menu(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    await query.edit_message_text(
+        f"🔕 Mute alerts for family <b>{name}</b>?\n\nChoose duration:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_mute_submenu(f"family_mute:{name}", f"family:{name}"),
+    )
+
+
+async def _action_family_mute(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    dur = parts[2] if len(parts) > 2 else "forever"
+    if ctx.mute_store:
+        ctx.mute_store.mute("family", name, _until(dur))
+    await _show_family_view(query, name)
+
+
+async def _action_family_unmute(query, parts, ctx: "PluginContext") -> None:
+    name = parts[1]
+    if ctx.mute_store:
+        ctx.mute_store.unmute("family", name)
+    await _show_family_view(query, name)
+
+
+def register_core_actions(ctx: "PluginContext") -> None:
+    """Register all core callback actions and store the plugin context."""
+    global _plugin_ctx
+    _plugin_ctx = ctx
+
+    a = ctx.actions
+    a.register("menu", _action_menu)
+    a.register("family", _action_family)
+    a.register("container", _action_container)
+    a.register("qlogs", _action_qlogs)
+    a.register("logs", _action_logs)
+    a.register("errors", _action_errors)
+    a.register("restart", _action_restart)
+    a.register("stop", _action_stop)
+    a.register("start", _action_start)
+    a.register("rebuild", _action_rebuild)
+    a.register("rebuild_confirm", _action_rebuild_confirm)
+    a.register("family_restart", _action_family_restart)
+    a.register("family_rebuild", _action_family_rebuild)
+    a.register("family_logs", _action_family_logs)
+    a.register("family_stop", _action_family_stop)
+    a.register("family_stop_confirm", _action_family_stop_confirm)
+    a.register("family_start", _action_family_start)
+    a.register("forget", _action_forget)
+    a.register("last_alert", _action_last_alert)
+    a.register("host_status", _action_host_status)
+    a.register("ignore_sig", _action_ignore_sig)
+    a.register("plugins_menu", _action_plugins_menu)
+    a.register("mute_menu", _action_mute_menu)
+    a.register("mute", _action_mute)
+    a.register("unmute", _action_unmute)
+    a.register("family_mute_menu", _action_family_mute_menu)
+    a.register("family_mute", _action_family_mute)
+    a.register("family_unmute", _action_family_unmute)
+
+
 # ── Callback handler ─────────────────────────────────────────────────────────
 
 async def handle_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE,
     allowed_users: set[int],
-    notifier: Notifier,
-    watchdog: HostWatchdog,
-    log_loop_manager: LogLoopManager,
+    plugin_ctx: "PluginContext",
 ) -> None:
     query = update.callback_query
     if not query:
@@ -294,286 +750,23 @@ async def handle_callback(
     parts = data.split(":", 2)
     action = parts[0]
 
+    handler = plugin_ctx.actions.get(action)
+    if handler is None:
+        logger.warning("Unknown callback action: %s", action)
+        try:
+            await query.edit_message_text(
+                f"Unknown action: <code>{action}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ Menu", callback_data="menu"),
+                ]]),
+            )
+        except Exception:
+            pass
+        return
+
     try:
-        if action == "menu":
-            await _edit_main_menu(query)
-
-        elif action == "family":
-            family_name = parts[1]
-            await _show_family_view(query, family_name)
-
-        elif action == "container":
-            name = parts[1]
-            await _show_container_detail(query, name)
-
-        elif action == "qlogs":
-            name = parts[1]
-            await _show_quick_logs(query, name)
-
-        elif action == "logs":
-            name, tail = parts[1], int(parts[2])
-            await _show_logs(query, name, tail)
-
-        elif action == "errors":
-            name = parts[1]
-            await _show_errors_only(query, name)
-
-        elif action == "restart":
-            name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Restarting <code>{name}</code>…", parse_mode=ParseMode.HTML
-            )
-            result = await docker_ops.restart_container(name)
-            await query.edit_message_text(
-                result, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
-                    InlineKeyboardButton("📋 Logs", callback_data=f"logs:{name}:100"),
-                ]]),
-            )
-
-        elif action == "stop":
-            name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Stopping <code>{name}</code>…", parse_mode=ParseMode.HTML
-            )
-            result = await docker_ops.stop_container(name)
-            await query.edit_message_text(
-                result, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
-                ]]),
-            )
-
-        elif action == "start":
-            name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Starting <code>{name}</code>…", parse_mode=ParseMode.HTML
-            )
-            result = await docker_ops.start_container(name)
-            await query.edit_message_text(
-                result, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
-                    InlineKeyboardButton("📋 Logs", callback_data=f"logs:{name}:100"),
-                ]]),
-            )
-
-        elif action == "rebuild":
-            name = parts[1]
-            entry = await asyncio.to_thread(_find_entry, name)
-            rebuildable = docker_ops.is_rebuildable(entry) if entry else False
-            if not rebuildable:
-                await query.edit_message_text(
-                    f"<code>{name}</code> has no local Dockerfile — cannot rebuild from source.\n"
-                    "Use Restart to restart from current image.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
-                    ]]),
-                )
-                return
-            confirm_kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Yes, Rebuild", callback_data=f"rebuild_confirm:{name}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"container:{name}"),
-            ]])
-            await query.edit_message_text(
-                f"<b>Rebuild {name}?</b>\n\n"
-                "1. <code>docker compose down</code> (whole project stack)\n"
-                "2. <code>docker build</code> from source\n"
-                "3. <code>docker compose up -d</code>\n\n"
-                "May take a few minutes on the Pi.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=confirm_kb,
-            )
-
-        elif action == "rebuild_confirm":
-            name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Rebuilding <code>{name}</code>…\nStep 1/3: compose down",
-                parse_mode=ParseMode.HTML,
-            )
-            try:
-                build_tail, run_logs = await docker_ops.rebuild_container(name)
-            except Exception as exc:
-                await query.edit_message_text(
-                    f"❌ <b>Rebuild failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
-                    ]]),
-                )
-                return
-            body = (
-                f"✅ <b>{name} rebuilt</b>\n\n"
-                f"<b>Build (last lines):</b>\n<code>{_escape(build_tail[-1500:])}</code>\n\n"
-                f"<b>Container logs (last 100):</b>\n<code>{_escape(run_logs[:2000])}</code>"
-            )
-            back_kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Back", callback_data=f"container:{name}"),
-            ]])
-            if len(body) > 4000:
-                doc = io.BytesIO((build_tail + "\n---\n" + run_logs).encode())
-                doc.name = f"{name}_rebuild.txt"
-                await query.edit_message_text(
-                    f"✅ <b>{name}</b> rebuilt. Full output below.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=back_kb,
-                )
-                await query.message.reply_document(document=doc, caption=f"{name}_rebuild.txt")
-            else:
-                await query.edit_message_text(body, parse_mode=ParseMode.HTML, reply_markup=back_kb)
-
-        elif action == "family_restart":
-            family_name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Restarting all in <b>{family_name}</b>…", parse_mode=ParseMode.HTML
-            )
-            result = await docker_ops.restart_family(family_name)
-            await query.edit_message_text(
-                result, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
-                ]]),
-            )
-
-        elif action == "family_rebuild":
-            family_name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Rebuilding <b>{family_name}</b>…", parse_mode=ParseMode.HTML
-            )
-            try:
-                result = await docker_ops.rebuild_family(family_name)
-            except Exception as exc:
-                result = f"❌ <b>Rebuild failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>"
-            await query.edit_message_text(
-                result, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
-                ]]),
-            )
-
-        elif action == "family_logs":
-            family_name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Fetching merged logs for <b>{family_name}</b>…", parse_mode=ParseMode.HTML
-            )
-            try:
-                logs = await docker_ops.family_merged_logs(family_name)
-            except Exception as exc:
-                logs = f"Error: {exc}"
-            back_kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
-            ]])
-            full = f"<b>{family_name}</b> — merged logs:\n\n<code>{_escape(logs)}</code>"
-            if len(full) > 4000:
-                doc = io.BytesIO(logs.encode())
-                doc.name = f"{family_name}_merged_logs.txt"
-                await query.edit_message_text(
-                    f"📎 <b>{family_name}</b> — merged logs sent as file below.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=back_kb,
-                )
-                await query.message.reply_document(document=doc, caption=f"{family_name}_merged_logs.txt")
-            else:
-                await query.edit_message_text(full, parse_mode=ParseMode.HTML, reply_markup=back_kb)
-
-        elif action == "family_stop":
-            family_name = parts[1]
-            confirm_kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Yes, Stop all", callback_data=f"family_stop_confirm:{family_name}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"family:{family_name}"),
-            ]])
-            await query.edit_message_text(
-                f"<b>Stop all — {family_name}?</b>\n\n"
-                "Runs <code>docker compose down</code>.\n"
-                "Containers will be <b>removed</b> (not just stopped).\n"
-                "They remain visible in the bot as ⚫ ghosts and can be\n"
-                "restarted with <b>Start all</b>.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=confirm_kb,
-            )
-
-        elif action == "family_stop_confirm":
-            family_name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Running compose down for <b>{family_name}</b>…", parse_mode=ParseMode.HTML
-            )
-            try:
-                result = await docker_ops.stop_family(family_name)
-            except Exception as exc:
-                result = f"❌ <b>Stop failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>"
-            await query.edit_message_text(
-                result, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
-                ]]),
-            )
-
-        elif action == "family_start":
-            family_name = parts[1]
-            await query.edit_message_text(
-                f"⏳ Starting <b>{family_name}</b>…", parse_mode=ParseMode.HTML
-            )
-            try:
-                result = await docker_ops.start_family(family_name)
-            except Exception as exc:
-                result = f"❌ <b>Start failed</b>:\n<code>{_escape(str(exc)[:1500])}</code>"
-            await query.edit_message_text(
-                result, parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=f"family:{family_name}"),
-                ]]),
-            )
-
-        elif action == "forget":
-            name = parts[1]
-            reg.forget(name)
-            # Navigate back to family or menu
-            entry = await asyncio.to_thread(_find_entry, name)
-            back_cb = f"family:{entry.family}" if entry and entry.family != name else "menu"
-            await query.edit_message_text(
-                f"🗑 <code>{name}</code> removed from registry.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data=back_cb),
-                ]]),
-            )
-
-        elif action == "last_alert":
-            last = notifier.last_alert
-            if last is None:
-                await query.edit_message_text(
-                    "No alerts yet.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("◀️ Menu", callback_data="menu"),
-                    ]]),
-                )
-            else:
-                container_name, ts = last
-                await query.edit_message_text(
-                    f"🔔 Last alert: <code>{container_name}</code>  ({ts})\n\nNavigating…",
-                    parse_mode=ParseMode.HTML,
-                )
-                await _show_container_detail(query, container_name)
-
-        elif action == "host_status":
-            docker_stats = await _get_docker_stats()
-            text = await asyncio.to_thread(watchdog.host_status_text, docker_stats)
-            await query.edit_message_text(
-                text, parse_mode=ParseMode.HTML,
-                reply_markup=_status_keyboard(),
-            )
-
-        elif action == "ignore_sig":
-            sig_hash = parts[1]
-            notifier.ignore_signature(sig_hash)
-            log_loop_manager.reload_rules()
-            await query.edit_message_text(
-                f"🚫 Signature <code>{sig_hash}</code> will be ignored.",
-                parse_mode=ParseMode.HTML,
-            )
-
+        await handler(query, parts, plugin_ctx)
     except Exception as exc:
         logger.exception("Callback error for action=%s", action)
         try:
@@ -591,7 +784,6 @@ async def handle_callback(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _find_entry(name: str, families: dict | None = None) -> Optional[Entry]:
-    """Look up a container Entry by name across all families."""
     if families is None:
         families = docker_ops.list_families()
     for members in families.values():
@@ -642,7 +834,6 @@ async def _show_container_detail(query, name: str) -> None:
     entry = _find_entry(name, families)
 
     if entry is None:
-        # Not in live Docker nor registry
         await query.edit_message_text(
             f"Container <code>{name}</code> not found in Docker or registry.",
             parse_mode=ParseMode.HTML,
@@ -653,12 +844,9 @@ async def _show_container_detail(query, name: str) -> None:
         return
 
     text = docker_ops.container_detail_text(entry)
-
-    # Determine back target
     family_name = entry.family
     members = families.get(family_name, [])
     back_family = None if docker_ops.is_leaf_family(family_name, members) else family_name
-
     keyboard = _container_keyboard(entry, back_family)
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
@@ -696,8 +884,7 @@ async def _show_logs(query, name: str, tail: int) -> None:
 
     back_kb = _logs_keyboard(name, tail)
     header = f"<b>{name}</b> — last {tail} lines:\n\n"
-    body = f"<code>{_escape(logs)}</code>"
-    full = header + body
+    full = header + f"<code>{_escape(logs)}</code>"
 
     if len(full) > 4000:
         doc = io.BytesIO(logs.encode())
@@ -744,5 +931,5 @@ async def _show_errors_only(query, name: str) -> None:
     await query.edit_message_text(full, parse_mode=ParseMode.HTML, reply_markup=back_kb)
 
 
-def _escape(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
