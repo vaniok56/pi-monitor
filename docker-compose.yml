@@ -14,9 +14,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Registry persistence — stores the container registry between restarts.
       - ./bot-data:/data
+      # Config directory (plugins, log rules)
+      - ./bot/config:/app/config
       # Must be mounted at the exact host path so that "docker compose" calls
       # inside the container produce volume paths the daemon can resolve.
       - ${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:rw
+      # Extra disks — mounted read-only so host_status_text can report their usage.
+      - /mnt/backup-ssd:/mnt/backup-ssd:ro
     networks:
       - pi-monitor
 

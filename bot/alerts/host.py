@@ -173,8 +173,41 @@ def _parse_size(s: str) -> int:
     return 0
 
 
+_PSEUDO_FSTYPES = frozenset({
+    "tmpfs", "devtmpfs", "squashfs", "overlay", "proc", "sysfs",
+    "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
+    "securityfs", "fusectl", "hugetlbfs", "mqueue", "configfs",
+    "ramfs", "devpts", "autofs", "nsfs",
+})
+
 _host_stats_cache: tuple[float, dict] | None = None
 _HOST_STATS_TTL = 1.0  # seconds
+
+
+def _get_disk_usages() -> list[tuple[str, "psutil._common.sdiskusage"]]:
+    """Return (mountpoint, usage) for each unique real disk partition."""
+    seen_devices: set[str] = set()
+    results: list[tuple[str, object]] = []
+    try:
+        partitions = psutil.disk_partitions(all=False)
+    except Exception:
+        return [("/", psutil.disk_usage("/"))]
+    for p in partitions:
+        if p.fstype in _PSEUDO_FSTYPES:
+            continue
+        if p.device.startswith("/dev/loop"):
+            continue
+        if p.device in seen_devices:
+            continue
+        seen_devices.add(p.device)
+        try:
+            usage = psutil.disk_usage(p.mountpoint)
+        except PermissionError:
+            continue
+        results.append((p.mountpoint, usage))
+    if not results:
+        return [("/", psutil.disk_usage("/"))]
+    return results
 
 
 def get_host_stats_sync() -> dict:
@@ -185,14 +218,15 @@ def get_host_stats_sync() -> dict:
         return _host_stats_cache[1]
     mem = psutil.virtual_memory()
     swap = psutil.swap_memory()
-    disk = psutil.disk_usage("/")
+    disks = _get_disk_usages()
     load1, load5, load15 = psutil.getloadavg()
     temp = _get_temperature()
     uptime_secs = time.time() - psutil.boot_time()
     result = {
         "mem": mem,
         "swap": swap,
-        "disk": disk,
+        "disk": disks[0][1],   # kept for backwards compat (watchdog alert key reuse)
+        "disks": disks,
         "load": (load1, load5, load15),
         "temp": temp,
         "uptime_secs": uptime_secs,
@@ -243,7 +277,6 @@ class HostWatchdog:
         stats = get_host_stats_sync()
         mem = stats["mem"]
         swap = stats["swap"]
-        disk = stats["disk"]
         load1, _, _ = stats["load"]
         temp = stats["temp"]
 
@@ -269,17 +302,19 @@ class HostWatchdog:
                 key="host:swap",
             ))
 
-        if disk.percent >= self.disk_pct:
-            put_alert(AlertItem(
-                type=AlertType.HOST_RESOURCE,
-                title="💿 Disk critical",
-                body=(
-                    f"Disk (/) usage: <b>{disk.percent:.1f}%</b> "
-                    f"({_fmt_bytes(disk.used)} / {_fmt_bytes(disk.total)}, "
-                    f"free: {_fmt_bytes(disk.free)})"
-                ),
-                key="host:disk",
-            ))
+        for mountpoint, disk in stats["disks"]:
+            if disk.percent >= self.disk_pct:
+                safe_mp = mountpoint.replace("/", "_").strip("_") or "root"
+                put_alert(AlertItem(
+                    type=AlertType.HOST_RESOURCE,
+                    title="💿 Disk critical",
+                    body=(
+                        f"Disk <code>{mountpoint}</code> usage: <b>{disk.percent:.1f}%</b> "
+                        f"({_fmt_bytes(disk.used)} / {_fmt_bytes(disk.total)}, "
+                        f"free: {_fmt_bytes(disk.free)})"
+                    ),
+                    key=f"host:disk:{safe_mp}",
+                ))
 
         load_per_core = load1 / core_count
         if load_per_core >= self.cpu_load:
@@ -311,7 +346,7 @@ class HostWatchdog:
         stats = get_host_stats_sync()
         mem = stats["mem"]
         swap = stats["swap"]
-        disk = stats["disk"]
+        disks = stats["disks"]
         load1, load5, load15 = stats["load"]
         temp = stats["temp"]
         uptime_secs = stats["uptime_secs"]
@@ -326,9 +361,11 @@ class HostWatchdog:
             lines.append(
                 f"💤  Swap:  {_fmt_bytes(swap.used)} / {_fmt_bytes(swap.total)}  ({swap.percent:.1f}%)"
             )
-        lines.append(
-            f"💿  Disk:  {_fmt_bytes(disk.used)} / {_fmt_bytes(disk.total)}  ({disk.percent:.1f}%)"
-        )
+        for mountpoint, disk in disks:
+            lines.append(
+                f"💿  Disk <code>{mountpoint}</code>:  "
+                f"{_fmt_bytes(disk.used)} / {_fmt_bytes(disk.total)}  ({disk.percent:.1f}%)"
+            )
         lines.append(f"🔥  CPU:   {load1:.2f} / {load5:.2f} / {load15:.2f}  (load avg)")
         if temp is not None:
             lines.append(f"🌡  Temp:  {temp:.1f} °C")
