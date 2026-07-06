@@ -10,8 +10,8 @@ services:
     env_file: .env
     environment:
       TZ: "${TZ:-UTC}"
+      DOCKER_HOST: "tcp://socket-proxy:2375"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       # Registry persistence — stores the container registry between restarts.
       - ./bot-data:/data
       # Config directory (plugins, log rules)
@@ -21,66 +21,23 @@ services:
       - ${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:rw
       # Extra disks — mounted read-only so host_status_text can report their usage.
       - /mnt/backup-ssd:/mnt/backup-ssd:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: 256M
     networks:
       - pi-monitor
-
-  # ── Optional monitoring stack (--profile monitoring) ────────────────────────
-  #
-  # Start with:
-  #   docker compose --profile monitoring up -d
-  #
-  # Beszel:    http://<your-pi>:8090  — system & Docker monitoring dashboard
-  # Portainer: http://<your-pi>:9000  — Docker web UI
-
-  beszel:
-    profiles: [monitoring]
-    image: henrygd/beszel:latest
-    container_name: beszel
-    restart: unless-stopped
-    ports:
-      - "8090:8090"
-    volumes:
-      - ./beszel-data:/beszel_data
-    networks:
-      - pi-monitor
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  beszel-agent:
-    profiles: [monitoring]
-    image: henrygd/beszel-agent:latest
-    container_name: beszel-agent
-    restart: unless-stopped
-    # Host network gives the agent an accurate view of host interfaces,
-    # disk, and thermal zones without needing extra mounts.
-    network_mode: host
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./beszel-agent-data:/var/lib/beszel-agent
-    environment:
-      PORT: "45876"
-      # Generate KEY from Beszel hub UI: Systems → Add system → copy the public key.
-      # Then set BESZEL_KEY in .env and run: docker compose --profile monitoring up -d
-      KEY: "${BESZEL_KEY:-}"
-
-  portainer:
-    profiles: [monitoring]
-    image: portainer/portainer-ce:lts
-    container_name: portainer
-    restart: unless-stopped
-    ports:
-      - "9000:9000"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./portainer-data:/data
-    networks:
-      - pi-monitor
+      - socket-proxy
+      - ollama-net
 
 networks:
   pi-monitor:
     driver: bridge
-  # If you run a local Telegram Bot API server in a separate compose stack,
-  # declare its network here as external and add it to pi-control-bot's networks.
-  # Example:
-  #   my_bot_api_network:
-  #     external: true
+  socket-proxy:
+    external: true
+    name: socket-proxy
+  # ollama-mini — shared LLM backend for log_anomaly_spotter plugin
+  ollama-net:
+    external: true
+    name: ollama-net
