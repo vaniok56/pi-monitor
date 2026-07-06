@@ -1,12 +1,20 @@
 # Secrets
 .env
 .env.tmp
+.env.local
+restic-password
+*.pem
+*.key
 
 # Deploy config (user-specific, contains hostnames)
 .deploy.local
 
 # Per-host plugin config (use plugins.yml.example as template)
 bot/config/plugins.yml
+
+# Backup files from manual edits — never intentional commits
+*.bak
+*.orig
 
 # Tests (local only)
 tests/

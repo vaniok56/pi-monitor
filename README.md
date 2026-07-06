@@ -39,6 +39,7 @@ A Telegram bot for monitoring and managing Docker containers on a Raspberry Pi (
 - **midnight_restarter** — restart whitelisted containers on a daily schedule (replaces ad-hoc restarter sidecars)
 - **host_controls** — reboot, shutdown, restart bot, drop caches — all with two-step confirmation
 - **apt_maintenance** — instant action menu with separate update and cleanup flows, plus docker-sensitive confirm before upgrade
+- **minimax_usage** — MiniMax Coding Plan token usage: window/weekly quota %, today's tokens, last-30-days tokens with per-model breakdown ([auth caveat](bot/plugins/minimax_usage/README.md): session-cookie based, requires periodic manual refresh)
 - Opt-in per host via `bot/config/plugins.yml` — no Telegram toggle yet (planned)
 
 ### Optional Monitoring Stack
