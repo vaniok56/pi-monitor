@@ -156,16 +156,27 @@ class ContainerLogTailer:
         while not self._stop.is_set():
             try:
                 container = client.containers.get(self.name)
+                # Only follow logs for running containers. A stopped container's
+                # log stream returns existing lines then ends immediately, which
+                # would turn the reconnect loop below into a busy-loop (millions
+                # of reconnects/sec, pegging CPU + the docker socket-proxy).
+                if container.status != "running":
+                    self._stop.wait(timeout=30)
+                    continue
                 log_stream = container.logs(stream=True, follow=True, tail=0)
                 for raw_bytes in log_stream:
                     if self._stop.is_set():
                         break
                     self._process(raw_bytes.decode("utf-8", errors="replace").rstrip("\n"))
+                # Stream ended without error (container stopped/restarted, or the
+                # socket-proxy closed the follow). Throttle before reconnecting so
+                # an immediately-closing stream cannot become a busy-loop.
+                self._stop.wait(timeout=5)
             except docker.errors.NotFound:
                 break  # container gone; tailer exits
             except Exception as exc:
                 logger.debug("Log tailer %s error: %s", self.name, exc)
-                time.sleep(3)
+                self._stop.wait(timeout=3)
 
     def _process(self, line: str) -> None:
         # ── Flood guard ───────────────────────────────────────────────────
