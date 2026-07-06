@@ -39,12 +39,16 @@ A Telegram bot for monitoring and managing Docker containers on a Raspberry Pi (
 - **midnight_restarter** — restart whitelisted containers on a daily schedule (replaces ad-hoc restarter sidecars)
 - **host_controls** — reboot, shutdown, restart bot, drop caches — all with two-step confirmation
 - **apt_maintenance** — instant action menu with separate update and cleanup flows, plus docker-sensitive confirm before upgrade
+- **log_anomaly_spotter** — LLM-powered log triage digest from all running containers, on a schedule
+- **speedtest_outlier** — IsolationForest anomaly detection on speedtest-tracker results
+- **mergerfs_health** — per-mount disk usage on the host (mergerfs pools, individual drives, backup SSDs) via `nsenter`
+- **ssh_login_watcher** — polls `auth.log` for failed SSH logins, alerts on brute-force thresholds
+- **cert_expiry_watcher** — TLS certificate expiry checks for configured domains
+- **container_weekly_digest** — weekly fleet summary: top containers by CPU/RAM, restart counts
+- **restic_backup_watcher** — alerts if the newest restic snapshot is older than a configurable age
+- **uptime_kuma_summary** — Uptime Kuma monitor statuses via the public status-page API
+- **minimax_usage** — MiniMax Coding Plan token usage: window/weekly quota %, today's tokens, last-30-days tokens with per-model breakdown ([auth caveat](bot/plugins/minimax_usage/README.md): session-cookie based, requires periodic manual refresh)
 - Opt-in per host via `bot/config/plugins.yml` — no Telegram toggle yet (planned)
-
-### Optional Monitoring Stack
-- **Beszel** — lightweight system and Docker monitoring dashboard (`:8090`)
-- **Portainer** — Docker web UI (`:9000`)
-- Enabled via a single Docker Compose profile flag — zero extra config required
 
 ---
 
@@ -106,20 +110,6 @@ Send `/start` to your bot. You should see a menu with all your running container
 
 ---
 
-## Optional: Full Monitoring Stack
-
-Add Beszel (system monitoring) and Portainer (Docker web UI):
-
-```bash
-docker compose --profile monitoring up -d
-```
-
-Then open:
-- **Beszel**: `http://<your-pi>:8090` — first login creates an admin account. Go to *Systems → Add system* to connect the Beszel agent. Copy the public key into `BESZEL_KEY` in your `.env`, then run `docker compose --profile monitoring up -d` again.
-- **Portainer**: `http://<your-pi>:9000` — first login creates an admin account.
-
----
-
 ## Configuration
 
 ### Environment Variables
@@ -140,7 +130,6 @@ Then open:
 | `TEMP_THRESHOLD_C` | | `75` | CPU/SoC temperature (°C) that triggers an alert |
 | `ALERT_COOLDOWN_MINUTES` | | `10` | Minimum gap between repeated alerts for the same issue |
 | `TZ` | | `UTC` | IANA timezone for all display timestamps and cron/daily schedules |
-| `BESZEL_KEY` | | — | Beszel agent public key (monitoring profile only) |
 
 ### Plugins
 
@@ -231,7 +220,7 @@ Telegram ←──────────────────────�
                                               │
                             ┌─────────────────┼─────────────────────┐
                             │                 │                     │
-                     Docker Socket     Docker Socket          Docker Socket
+                    docker-socket-proxy  docker-socket-proxy   docker-socket-proxy
                             │                 │                     │
                     DockerEventsMonitor  HostWatchdog         LogLoopManager
                     (crash / restart /   (CPU / RAM /         (per-container
@@ -247,6 +236,10 @@ Telegram ←──────────────────────�
 ```
 
 All alert sources push into a single async notifier queue. One consumer sends to all allowed users, deduplicating within the cooldown window.
+
+The bot never mounts `/var/run/docker.sock` directly — it talks to Docker through a
+`socket-proxy` container on a shared external network (`DOCKER_HOST=tcp://socket-proxy:2375`),
+keeping the raw socket off the bot's filesystem.
 
 ---
 
@@ -283,8 +276,8 @@ cp .deploy.local.template .deploy.local
 - Verify `BOT_TOKEN` is set and valid in `.env`
 - Make sure your Telegram user ID is in `ALLOWED_USER_IDS`
 
-**"Permission denied" on Docker socket**
-- The bot container needs access to `/var/run/docker.sock`. On some systems you may need to add the user to the `docker` group or adjust socket permissions.
+**"Permission denied" / can't reach Docker**
+- The bot talks to Docker via a `socket-proxy` container (`DOCKER_HOST=tcp://socket-proxy:2375`), not a direct socket mount. Make sure the `socket-proxy` container is running and on the same external network as `pi-control-bot`.
 
 **Rebuild fails: "docker compose not found"**
 - The Dockerfile installs Docker CLI + Compose plugin. If the build fails at that step, check your internet connection and Docker Hub access from the Pi.
