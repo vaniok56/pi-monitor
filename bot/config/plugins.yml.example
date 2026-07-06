@@ -55,6 +55,19 @@ enabled:
   #   max_listed_updates: 20
   #   helper_image: "alpine:3.20"
 
+  # ── minimax_usage ─────────────────────────────────────────────────────────────
+  # MiniMax Coding Plan usage: window + weekly remaining %, reset countdowns, per bucket.
+  # Auth is a browser session cookie (_token JWT) + X-Group-Id header, NOT a stable
+  # API key — the community endpoint this once used (minimaxi.com) died when MiniMax
+  # migrated to platform.minimax.io; this plugin hits the new domain directly, same
+  # way the platform web console itself does.
+  # The _token cookie EXPIRES (observed ~2-3 weeks) — see the plugin README for how
+  # to re-extract it from browser DevTools when the button shows "session expired".
+  # minimax_usage:
+  #   session_token_env: "MINIMAX_SESSION_TOKEN"   # secrets-server key holding _token
+  #   group_id_env: "MINIMAX_GROUP_ID"              # secrets-server key, stable/no expiry
+  #   timeout: 15
+
   # ── wol_sender ────────────────────────────────────────────────────────────────
   # Send Wake-on-LAN magic packets. One button per target.
   # wol_sender:
