@@ -86,6 +86,20 @@ enabled:
   #   schedule: "0 */4 * * *"
   #   history_path: /data/disk_history.json
 
+  # ── minimax_usage ─────────────────────────────────────────────────────────────
+  # Show MiniMax Coding Plan token usage (current-window + weekly remaining %,
+  # reset countdowns, today + last-30-days token totals with per-model breakdown).
+  #
+  # Auth caveat: MiniMax's public API does NOT expose Coding Plan quota. This
+  # plugin talks to the same private endpoint the platform web console uses,
+  # which authenticates via browser session cookie (not a stable API key).
+  # The _token cookie expires every ~2-3 weeks — refresh steps are in
+  # bot/plugins/minimax_usage/README.md.
+  # minimax_usage:
+  #   session_token_env: "MINIMAX_SESSION_TOKEN"
+  #   group_id_env: "MINIMAX_GROUP_ID"
+  #   timeout: 15
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Mac mini sample — same bot image, host-specific plugins
