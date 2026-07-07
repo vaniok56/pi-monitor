@@ -39,6 +39,13 @@ _USAGE_SUMMARY_URL = "https://platform.minimax.io/backend/account/token_plan/usa
 _STATUS_ACTIVE = 1
 
 _ROLLING_WINDOW_DAYS = 30
+_BAR_WIDTH = 12
+_BUCKET_LABEL_WIDTH = 18
+
+_REFRESH_PLUGINS_ROW = [
+    InlineKeyboardButton("🔄 Refresh", callback_data=_CB_MENU),
+    InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS),
+]
 
 
 def _fetch_json(url: str, session_token: str, group_id: str, timeout: int) -> dict:
@@ -67,47 +74,77 @@ def _format_tokens(n: float) -> str:
 
 def _format_reset(ms: int) -> str:
     total_seconds = max(ms, 0) // 1000
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days > 0:
+        return f"{days}d {hours}h"
     if hours > 0:
         return f"{hours}h{minutes}m"
     return f"{minutes}m"
 
 
-def _bar(remaining_percent: int, width: int = 10) -> str:
-    filled = round((remaining_percent / 100) * width)
+def _status_emoji(used_percent: int) -> str:
+    if used_percent >= 85:
+        return "🔴"
+    if used_percent >= 60:
+        return "🟡"
+    return "🟢"
+
+
+def _bar(used_percent: int, width: int = _BAR_WIDTH) -> str:
+    used = min(max(int(used_percent), 0), 100)
+    filled = round((used / 100) * width)
     filled = min(max(filled, 0), width)
-    return "█" * filled + "░" * (width - filled)
+    return f"{_status_emoji(used)} {'█' * filled}{'░' * (width - filled)} {used}%"
 
 
-def _format_bucket(bucket: dict, label: str) -> str:
+def _format_bucket(bucket: dict) -> str:
+    name = bucket.get("model_name", "unknown")[:_BUCKET_LABEL_WIDTH].ljust(_BUCKET_LABEL_WIDTH)
     remaining = bucket.get("current_interval_remaining_percent", 0)
-    used = 100 - remaining
     weekly_remaining = bucket.get("current_weekly_remaining_percent", 0)
+    used = 100 - remaining
     weekly_used = 100 - weekly_remaining
     reset_in = _format_reset(bucket.get("remains_time", 0))
     weekly_reset_in = _format_reset(bucket.get("weekly_remains_time", 0))
 
     return (
-        f"<b>{label}</b>\n"
-        f"Window: {_bar(remaining)} {used}% used  ·  resets in {reset_in}\n"
-        f"Week:   {_bar(weekly_remaining)} {weekly_used}% used  ·  resets in {weekly_reset_in}"
+        f"<code>{name}</code>\n"
+        f"  🪟 Window  {_bar(used)}  ·  resets in {reset_in}\n"
+        f"  📅 Week    {_bar(weekly_used)}  ·  resets in {weekly_reset_in}"
     )
 
 
-def _format_remains_section(payload: dict) -> str:
-    buckets = payload.get("model_remains", [])
+def _format_header(remains_payload: dict) -> str:
+    buckets = [
+        b for b in remains_payload.get("model_remains", [])
+        if b.get("current_interval_status") == _STATUS_ACTIVE
+    ]
+    now = datetime.datetime.now().strftime("%H:%M")
+
     if not buckets:
-        return "No usage buckets returned."
+        return (
+            f"🤖 <b>MiniMax Coding Plan Usage</b>\n"
+            f"<i>Last updated {now}</i>\n\n"
+            f"ℹ️ No active usage buckets — Coding Plan may not be enabled on this group."
+        )
 
-    active = [b for b in buckets if b.get("current_interval_status") == _STATUS_ACTIVE]
+    return (
+        f"🤖 <b>MiniMax Coding Plan Usage</b>\n"
+        f"<i>Last updated {now}</i>"
+    )
 
-    lines = []
-    for bucket in active:
-        lines.append(_format_bucket(bucket, bucket.get("model_name", "unknown")))
-        lines.append("")
 
-    return "\n".join(lines).strip()
+def _format_bucket_sections(remains_payload: dict) -> str:
+    buckets = [
+        b for b in remains_payload.get("model_remains", [])
+        if b.get("current_interval_status") == _STATUS_ACTIVE
+    ]
+    if not buckets:
+        return ""
+
+    blocks = [_format_bucket(b) for b in buckets]
+    return "\n\n".join(blocks)
 
 
 def _format_today_section(payload: dict) -> str:
@@ -118,7 +155,7 @@ def _format_today_section(payload: dict) -> str:
     today = datetime.date.today().isoformat()
     entry = next((d for d in daily if d.get("date") == today), None)
     if entry is None:
-        return f"<b>Today</b>\n0 tokens so far"
+        return "📅 <b>Today</b>\n<i>0 tokens so far</i>"
 
     total = entry.get("total_token", 0)
     model_totals = sorted(
@@ -128,7 +165,7 @@ def _format_today_section(payload: dict) -> str:
     )
     model_lines = "\n".join(f"  · {name}: {_format_tokens(t)}" for name, t in model_totals if t > 0)
 
-    lines = [f"<b>Today</b>", f"{_format_tokens(total)} tokens"]
+    lines = [f"📅 <b>Today</b>  ·  {_format_tokens(total)} tokens"]
     if model_lines:
         lines.append(model_lines)
     return "\n".join(lines)
@@ -157,8 +194,8 @@ def _format_rolling_window_section(payload: dict) -> str:
     model_lines = "\n".join(f"  · {name}: {_format_tokens(t)}" for name, t in top_models if t > 0)
 
     lines = [
-        f"<b>Last {_ROLLING_WINDOW_DAYS} days</b>",
-        f"{_format_tokens(total)} tokens across {active_days} active day{'s' if active_days != 1 else ''}",
+        f"📊 <b>Last {_ROLLING_WINDOW_DAYS} days</b>  ·  {_format_tokens(total)} tokens",
+        f"<i>across {active_days} active day{'s' if active_days != 1 else ''}</i>",
     ]
     if model_lines:
         lines.append(model_lines)
@@ -166,19 +203,33 @@ def _format_rolling_window_section(payload: dict) -> str:
 
 
 def _format_usage_message(remains_payload: dict, summary_payload: dict) -> str:
-    parts = ["🤖 <b>MiniMax Coding Plan Usage</b>", "", _format_remains_section(remains_payload)]
+    parts = [_format_header(remains_payload)]
+
+    bucket_blocks = _format_bucket_sections(remains_payload)
+    if bucket_blocks:
+        parts.append("")
+        parts.append(bucket_blocks)
 
     today = _format_today_section(summary_payload)
-    if today:
-        parts.append("")
-        parts.append(today)
-
     rolling = _format_rolling_window_section(summary_payload)
-    if rolling:
+    tail_sections = [s for s in (today, rolling) if s]
+    if tail_sections:
         parts.append("")
-        parts.append(rolling)
+        parts.append("\n—————————\n".join(tail_sections))
 
     return "\n".join(parts).strip()
+
+
+async def _edit_error(query, title_icon: str, body: str, *, show_retry: bool = True) -> None:
+    rows = []
+    if show_retry:
+        rows.append([InlineKeyboardButton("🔄 Retry", callback_data=_CB_MENU)])
+    rows.append([InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS)])
+    await query.edit_message_text(
+        f"🤖 <b>MiniMax Usage</b>\n\n{title_icon} {body}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 async def _handle_action(query, parts, ctx: "PluginContext") -> None:
@@ -193,13 +244,11 @@ async def _handle_action(query, parts, ctx: "PluginContext") -> None:
     group_id = os.environ.get(group_id_env, "")
 
     if not session_token or not group_id:
-        await query.edit_message_text(
-            f"🤖 <b>MiniMax Usage</b>\n\n"
-            f"❌ Missing <code>{session_token_env}</code> or <code>{group_id_env}</code> in env.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS)],
-            ]),
+        await _edit_error(
+            query,
+            "⛔",
+            f"Missing <code>{session_token_env}</code> or <code>{group_id_env}</code> in env.",
+            show_retry=False,
         )
         return
 
@@ -214,34 +263,13 @@ async def _handle_action(query, parts, ctx: "PluginContext") -> None:
             timeout=timeout + 5,
         )
     except asyncio.TimeoutError:
-        await query.edit_message_text(
-            f"🤖 <b>MiniMax Usage</b>\n\n❌ Request timed out after {timeout}s",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Retry", callback_data=_CB_MENU)],
-                [InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS)],
-            ]),
-        )
+        await _edit_error(query, "⏱", f"Request timed out after {timeout}s")
         return
     except urllib.error.HTTPError as exc:
-        await query.edit_message_text(
-            f"🤖 <b>MiniMax Usage</b>\n\n❌ HTTP {exc.code} from platform.minimax.io",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Retry", callback_data=_CB_MENU)],
-                [InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS)],
-            ]),
-        )
+        await _edit_error(query, "🌐", f"HTTP {exc.code} from platform.minimax.io")
         return
     except Exception as exc:
-        await query.edit_message_text(
-            f"🤖 <b>MiniMax Usage</b>\n\n❌ {str(exc)[:200]}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Retry", callback_data=_CB_MENU)],
-                [InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS)],
-            ]),
-        )
+        await _edit_error(query, "❌", str(exc)[:200])
         return
 
     remains_status = remains_payload.get("base_resp", {}).get("status_code")
@@ -252,17 +280,17 @@ async def _handle_action(query, parts, ctx: "PluginContext") -> None:
             or summary_payload.get("base_resp", {}).get("status_msg")
             or "unknown error"
         )
-        await query.edit_message_text(
-            f"🤖 <b>MiniMax Usage</b>\n\n"
-            f"⚠️ Session expired ({status_msg}).\n\n"
-            f"Re-extract <code>_token</code> from platform.minimax.io DevTools "
-            f"(Network tab → any request → Cookie header → <code>_token=</code> value), then:\n"
-            f"<code>secrets-cli put {session_token_env}</code>\n"
-            f"then redeploy: <code>docker compose up -d --build pi-control-bot</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS)],
-            ]),
+        await _edit_error(
+            query,
+            "🔑",
+            (
+                f"Session expired ({status_msg}).\n\n"
+                f"Re-extract <code>_token</code> from platform.minimax.io DevTools "
+                f"(Network tab → any request → Cookie header → <code>_token=</code> value), then:\n"
+                f"<code>secrets-cli put {session_token_env}</code>\n"
+                f"then redeploy: <code>docker compose up -d --build pi-control-bot</code>"
+            ),
+            show_retry=False,
         )
         return
 
@@ -271,10 +299,7 @@ async def _handle_action(query, parts, ctx: "PluginContext") -> None:
     await query.edit_message_text(
         body,
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data=_CB_MENU)],
-            [InlineKeyboardButton("◀️ Plugins", callback_data=_CB_PLUGINS)],
-        ]),
+        reply_markup=InlineKeyboardMarkup([_REFRESH_PLUGINS_ROW]),
     )
 
 
