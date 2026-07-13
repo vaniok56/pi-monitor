@@ -31,6 +31,9 @@ from alerts.notifier import put_alert
 
 logger = logging.getLogger(__name__)
 
+# Compile ANSI escape regex
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
 # ── Fingerprinting regexes ───────────────────────────────────────────────────
 _FP_RULES: list[tuple[re.Pattern, str]] = [
     # Leading timestamps: HH:MM:SS.mmm, ISO 8601, syslog, Docker prefix
@@ -160,7 +163,9 @@ class ContainerLogTailer:
                 for raw_bytes in log_stream:
                     if self._stop.is_set():
                         break
-                    self._process(raw_bytes.decode("utf-8", errors="replace").rstrip("\n"))
+                    text = raw_bytes.decode("utf-8", errors="replace").rstrip("\n")
+                    text = ANSI_ESCAPE.sub('', text)
+                    self._process(text)
             except docker.errors.NotFound:
                 break  # container gone; tailer exits
             except Exception as exc:

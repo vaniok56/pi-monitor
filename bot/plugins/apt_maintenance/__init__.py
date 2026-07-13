@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import shlex
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, TypeVar
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -41,6 +41,11 @@ _DOCKER_KEYWORDS = (
     "compose",
 )
 
+_PROGRESS_FRAMES = ("⏳", "⌛")
+_PROGRESS_INTERVAL_SECONDS = 4
+
+_T = TypeVar("_T")
+
 
 def _escape_html(text: str) -> str:
     return (
@@ -54,6 +59,36 @@ def _truncate(text: str, limit: int = 3900) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 64] + "\n\n<i>Output truncated for Telegram.</i>"
+
+
+async def _run_with_progress_message(
+    query,
+    heading: str,
+    detail: str,
+    op: Awaitable[_T],
+    *,
+    interval_seconds: int = _PROGRESS_INTERVAL_SECONDS,
+) -> _T:
+    task = asyncio.create_task(op)
+    tick = 0
+
+    while True:
+        frame = _PROGRESS_FRAMES[tick % len(_PROGRESS_FRAMES)]
+        elapsed = tick * interval_seconds
+        await query.edit_message_text(
+            f"{frame} <b>{_escape_html(heading)}</b>\n\n"
+            f"{_escape_html(detail)}\n"
+            f"Elapsed: {elapsed}s",
+            parse_mode=ParseMode.HTML,
+        )
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=interval_seconds)
+            break
+        except asyncio.TimeoutError:
+            tick += 1
+
+    return await task
 
 
 def _menu_keyboard() -> InlineKeyboardMarkup:
@@ -127,13 +162,19 @@ async def _run_host_shell(script: str, helper_image: str, timeout: int = 900) ->
     return proc.returncode, output
 
 
-def _parse_upgradable_packages(simulation_output: str) -> list[str]:
+def _parse_upgradable_packages(output: str) -> list[str]:
+    seen: set[str] = set()
     packages: list[str] = []
-    for raw in simulation_output.splitlines():
+    for raw in output.splitlines():
         line = raw.strip()
-        m = re.match(r"^Inst\s+([^\s:]+)", line)
-        if m:
-            packages.append(m.group(1))
+        if not line or line.startswith("Listing..."):
+            continue
+        if "[upgradable from:" not in line:
+            continue
+        pkg = line.split("/", 1)[0].strip()
+        if pkg and pkg not in seen:
+            seen.add(pkg)
+            packages.append(pkg)
     return packages
 
 
@@ -165,7 +206,7 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 0
 fi
 apt-get update
-apt-get -s upgrade
+apt list --upgradable 2>/dev/null || true
 """.strip()
 
     rc, output = await _run_host_shell(script, helper_image=helper_image, timeout=1200)
@@ -191,7 +232,6 @@ apt-get -s upgrade
     return {
         "unsupported": False,
         "error": None,
-        "counts": _extract_upgrade_counts(output),
         "packages": packages,
         "listed_packages": listed_packages,
         "remaining_count": max(len(packages) - len(listed_packages), 0),
@@ -239,7 +279,7 @@ def _render_update_preview_text(preview: dict, result_note: str | None = None) -
         upgraded, newly_installed, to_remove, not_upgraded = counts
         lines.extend([
             "",
-            "Simulation summary:",
+            "Upgrade summary:",
             f"• {upgraded} upgraded",
             f"• {newly_installed} newly installed",
             f"• {to_remove} to remove",
@@ -375,7 +415,12 @@ async def _handle_action(query, parts, ctx: "PluginContext") -> None:
         )
 
     elif sub in {"update_preview", "confirm"}:
-        preview = await _collect_preview(max_listed_updates, helper_image)
+        preview = await _run_with_progress_message(
+            query,
+            "Checking available updates",
+            "Running apt-get update and collecting upgradable package list...",
+            _collect_preview(max_listed_updates, helper_image),
+        )
         can_run = not preview.get("unsupported") and not preview.get("error")
         await query.edit_message_text(
             _render_update_preview_text(preview),
@@ -384,7 +429,12 @@ async def _handle_action(query, parts, ctx: "PluginContext") -> None:
         )
 
     elif sub in {"update_run", "run", "update_run_force"}:
-        preview = await _collect_preview(max_listed_updates, helper_image)
+        preview = await _run_with_progress_message(
+            query,
+            "Preparing update run",
+            "Refreshing package index and checking for risky package upgrades...",
+            _collect_preview(max_listed_updates, helper_image),
+        )
         if preview.get("unsupported") or preview.get("error"):
             await query.edit_message_text(
                 _render_update_preview_text(preview),
@@ -412,8 +462,12 @@ async def _handle_action(query, parts, ctx: "PluginContext") -> None:
             )
             return
 
-        await query.edit_message_text("⏳ Running apt update + upgrade…")
-        rc, output = await _execute_update_flow(helper_image)
+        rc, output = await _run_with_progress_message(
+            query,
+            "Running apt update + upgrade",
+            "This can take a while on slower hosts. Progress text will refresh automatically.",
+            _execute_update_flow(helper_image),
+        )
         summary = _summarize_update_execution(output, rc)
         await query.edit_message_text(
             _menu_text(summary),
