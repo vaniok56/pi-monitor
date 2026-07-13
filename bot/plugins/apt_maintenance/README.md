@@ -6,6 +6,8 @@ Open instantly with a small action menu, then run host APT maintenance from Tele
 1. Update flow: apt-get update + apt-get upgrade -y
 2. Cleanup flow: apt-get autoremove -y + apt-get clean
 
+Update preview now uses `apt list --upgradable` after `apt-get update` and does **not** run `apt-get -s upgrade`.
+
 ## Configuration (plugins.yml)
 ```yaml
 enabled:
@@ -21,6 +23,7 @@ enabled:
   - ⬆️ Update -> runs update preview first, then confirmation, then update+upgrade
   - 🧹 Cleanup -> confirmation, then autoremove+clean
 - After execution, plugin returns to the menu with last-run summary.
+- During long-running update preview and update+upgrade operations, the message is periodically edited with elapsed time so users can see the action is still running.
 
 ## Docker-related safeguard
 If update preview contains docker-related packages (for example: docker, containerd, runc, compose, moby), an extra confirmation screen is shown before upgrade starts.

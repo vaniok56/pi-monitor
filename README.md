@@ -40,6 +40,7 @@ A Telegram bot for monitoring and managing Docker containers on a Raspberry Pi (
 - **host_controls** — reboot, shutdown, restart bot, drop caches — all with two-step confirmation
 - **apt_maintenance** — instant action menu with separate update and cleanup flows, plus docker-sensitive confirm before upgrade
 - **minimax_usage** — MiniMax Coding Plan token usage: per-bucket window + weekly remaining %, today's tokens, last-30-days tokens with per-model breakdown ([auth caveat](bot/plugins/minimax_usage/README.md): session-cookie based, requires periodic manual refresh)
+- **power_report** — daily & weekly electricity cost reports from Intel RAPL/psys (kWh + MDL/USD); auto-falls-back to `CPU% × TDP` estimate on hosts without RAPL (e.g. Raspberry Pi)
 - Opt-in per host via `bot/config/plugins.yml` — no Telegram toggle yet (planned)
 
 ### Optional Monitoring Stack
@@ -158,6 +159,13 @@ enabled:
     containers: [stremio-server]
     time: "04:00"            # optional HH:MM (configured TZ, default UTC); omit for manual-only
   host_controls: {}
+  # power_report uses two cron slots (daily + weekly) instead of one schedule.
+  # power_report:
+  #   mdl_per_kwh: 3.59        # electricity tariff
+  #   mdl_per_usd: 17.63       # FX rate for the USD figure
+  #   source: auto             # auto | psys | package | estimate
+  #   daily_schedule: "0 9 * * *"
+  #   weekly_schedule: "0 9 * * 1"
 ```
 
 For auto-capable plugins, omitting `schedule` / `time` / `interval_seconds` disables automatic execution and keeps the plugin manual-only in Telegram.
@@ -292,6 +300,9 @@ cp .deploy.local.template .deploy.local
 
 **No temperature reading in `/status`**
 - Temperature reading tries three methods: `psutil`, `/sys/class/thermal/thermal_zone0/temp`, and `vcgencmd`. If none work on your hardware, the field is simply omitted from the status display.
+
+**`power_report` numbers look low / jittery on a Raspberry Pi**
+- RAPL is Intel-only. Pi (and any non-Intel host) auto-falls-back to `CPU% × TDP` estimate, which is noisier and excludes RAM/disk/idle draw. Numbers are still directionally useful but won't match a wall meter. Leave `source: auto` to let the bot pick the best available source.
 
 **Want to use a local Telegram Bot API server?**
 - Set `TELEGRAM_API_BASE_URL=http://your-bot-api-host:8081/bot` in `.env`

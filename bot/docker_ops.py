@@ -26,15 +26,17 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
-import timez
 from typing import Optional
 
 import docker
+import timez
 
 import registry as reg
 
 logger = logging.getLogger(__name__)
+
+# Pattern to match ANSI escape sequences
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 _STATUS_EMOJI = {
     "running":    "🟢",
@@ -295,8 +297,9 @@ async def start_container(name: str) -> str:
 async def get_container_logs(name: str, tail: int = 100) -> str:
     client = docker.from_env()
     container = client.containers.get(name)
-    raw = await asyncio.to_thread(container.logs, tail=tail, timestamps=True)
-    return raw.decode("utf-8", errors="replace")
+    raw = await asyncio.to_thread(container.logs, tail=tail, timestamps=False)
+    text = raw.decode("utf-8", errors="replace")
+    return ANSI_ESCAPE.sub('', text)
 
 
 async def quick_logs(name: str) -> str:
