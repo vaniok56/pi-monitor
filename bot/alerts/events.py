@@ -40,10 +40,12 @@ _INTERNAL_HELPER_LABEL = "com.pi-monitor.internal_helper"
 def _get_quick_tail(name: str, lines: int = 15) -> str:
     """Synchronous best-effort tail of last N log lines."""
     try:
+        import re
         client = docker.from_env()
         container = client.containers.get(name)
         raw = container.logs(tail=lines, timestamps=False)
-        return raw.decode("utf-8", errors="replace").strip()
+        text = raw.decode("utf-8", errors="replace").strip()
+        return re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
     except Exception as exc:
         return f"(could not fetch logs: {exc})"
 

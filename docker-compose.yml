@@ -17,6 +17,8 @@ services:
       # Must be mounted at the exact host path so that "docker compose" calls
       # inside the container produce volume paths the daemon can resolve.
       - ${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:${DESKTOP_PATH:?Set DESKTOP_PATH in .env}:rw
+      # Host RAPL tree for power_report
+      - /sys/devices/virtual/powercap/intel-rapl:/host/powercap:ro
     networks:
       - pi-monitor
 
@@ -30,7 +32,7 @@ services:
 
   beszel:
     profiles: [monitoring]
-    image: henrygd/beszel:latest
+    image: henrygd/beszel@sha256:a849ad80814b6a1a3be665304dcace5d4854b3bed7bde4dd1227e8ce1b82d477
     container_name: beszel
     restart: unless-stopped
     ports:
@@ -44,7 +46,7 @@ services:
 
   beszel-agent:
     profiles: [monitoring]
-    image: henrygd/beszel-agent:latest
+    image: henrygd/beszel-agent@sha256:8874e2c53f9de5e063a6a80d6b617e20fa593ac5dc4eb4c6ce1f912f510f38f8
     container_name: beszel-agent
     restart: unless-stopped
     # Host network gives the agent an accurate view of host interfaces,
@@ -65,7 +67,7 @@ services:
     container_name: portainer
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./portainer-data:/data
